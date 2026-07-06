@@ -1,8 +1,7 @@
 // Service Worker for RestaurantOS
-const CACHE_NAME = 'restaurantos-v1';
+const CACHE_NAME = 'restaurantos-v3';
 const URLS_TO_CACHE = [
     '/',
-    '/index.html',
     '/app.js',
     '/style.css',
     '/manifest.json'
@@ -40,7 +39,7 @@ self.addEventListener('activate', event => {
     self.clients.claim();
 });
 
-// Fetch event - network first, then cache
+// Fetch event - Network first for HTML documents and customer pages
 self.addEventListener('fetch', event => {
     // Skip non-GET requests
     if (event.request.method !== 'GET') {
@@ -52,32 +51,54 @@ self.addEventListener('fetch', event => {
         return;
     }
 
+    const url = new URL(event.request.url);
+    
+    // NEVER cache HTML documents with restaurant parameter (customer pages)
+    // Customer pages must always fetch fresh menu data from server
+    if (event.request.destination === 'document' || url.searchParams.has('restaurant')) {
+        event.respondWith(
+            fetch(event.request)
+                .then(response => {
+                    if (!response || response.status !== 200) {
+                        return response;
+                    }
+                    // Don't cache customer pages - always get fresh menu data
+                    // This ensures customers see the latest menu items and prices
+                    return response;
+                })
+                .catch(() => {
+                    // If network fails, try cache
+                    return caches.match(event.request)
+                        .then(response => {
+                            if (response) return response;
+                            // Return index.html as fallback
+                            return caches.match('/index.html');
+                        });
+                })
+        );
+        return;
+    }
+
+    // Cache first for static assets (JS, CSS, images, etc)
     event.respondWith(
-        fetch(event.request)
+        caches.match(event.request)
             .then(response => {
-                // Don't cache non-successful responses
-                if (!response || response.status !== 200 || response.type === 'error') {
+                if (response) {
                     return response;
                 }
-
-                // Clone the response
-                const responseToCache = response.clone();
-
-                caches.open(CACHE_NAME)
-                    .then(cache => {
-                        cache.put(event.request, responseToCache);
-                    });
-
-                return response;
-            })
-            .catch(() => {
-                // Return cached response if network fails
-                return caches.match(event.request)
+                return fetch(event.request)
                     .then(response => {
-                        if (response) {
+                        if (!response || response.status !== 200 || response.type === 'error') {
                             return response;
                         }
-                        // Return offline page if available
+                        const responseToCache = response.clone();
+                        caches.open(CACHE_NAME)
+                            .then(cache => {
+                                cache.put(event.request, responseToCache);
+                            });
+                        return response;
+                    })
+                    .catch(() => {
                         if (event.request.destination === 'document') {
                             return caches.match('/index.html');
                         }
@@ -90,7 +111,6 @@ self.addEventListener('fetch', event => {
 self.addEventListener('sync', event => {
     if (event.tag === 'sync-orders') {
         event.waitUntil(
-            // Sync orders with server
             fetch('/api/sync-orders', {
                 method: 'POST',
                 body: JSON.stringify({
